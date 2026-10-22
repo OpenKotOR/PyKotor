@@ -3462,6 +3462,243 @@ class TestNCSCompiler(CompilerTestBase):
 
     # endregion
 
+    # region Multiple Forward Declaration Tests
+    #
+    # Each test compares the compiled bytes with a program assembled in the test from the NCS layout,
+    # so no Interpreter (and no compiler output) is involved. A prototype's NOP stub is where the
+    # function body ends up, so with N prototypes the N bodies must appear in prototype order.
+    # Regression: the stub used to be located with ``list.index``, which compares instructions by value,
+    # so every stub matched the first one and a second prototype's body was inserted at the wrong place.
+
+    @staticmethod
+    def _assemble_ncs(*items: bytes | tuple[str, str]) -> bytes:
+        """Assemble an NCS file independently of PyKotor's writer, resolving labelled jumps.
+
+        An item is raw instruction bytes, ``("label", name)`` or ``("JSR" | "JMP", name)``. Jump offsets are
+        relative to the address of the jump instruction itself.
+        """
+        jump_opcodes = {"JMP": 0x1D, "JSR": 0x1E}
+        header_size = 13  # "NCS V1.0", size marker 0x42, big-endian uint32 total size
+        labels: dict[str, int] = {}
+        address = header_size
+        for item in items:
+            if isinstance(item, bytes):
+                address += len(item)
+            elif item[0] == "label":
+                labels[item[1]] = address
+            else:
+                address += 6
+        body = b""
+        for item in items:
+            if isinstance(item, bytes):
+                body += item
+            elif item[0] != "label":
+                at = header_size + len(body)
+                body += bytes([jump_opcodes[item[0]], 0x00]) + (labels[item[1]] - at).to_bytes(
+                    4, "big", signed=True
+                )
+        return b"NCS V1.0" + bytes([0x42]) + (header_size + len(body)).to_bytes(4, "big") + body
+
+    _RSADDI = bytes([0x02, 0x03])
+    _RETN = bytes([0x20, 0x00])
+    _ADDII = bytes([0x14, 0x20])
+    _MULII = bytes([0x16, 0x20])
+
+    @staticmethod
+    def _consti(value: int) -> bytes:
+        return bytes([0x04, 0x03]) + value.to_bytes(4, "big", signed=True)
+
+    @staticmethod
+    def _cptopsp(offset: int) -> bytes:  # copies 4 bytes
+        return bytes([0x03, 0x01]) + offset.to_bytes(4, "big", signed=True) + (4).to_bytes(2, "big")
+
+    @staticmethod
+    def _cpdownsp(offset: int) -> bytes:  # copies 4 bytes
+        return bytes([0x01, 0x01]) + offset.to_bytes(4, "big", signed=True) + (4).to_bytes(2, "big")
+
+    @staticmethod
+    def _movsp(offset: int) -> bytes:
+        return bytes([0x1B, 0x00]) + offset.to_bytes(4, "big", signed=True)
+
+    @classmethod
+    def _add_constant_function(cls, label: str, constant: int) -> list[bytes | tuple[str, str]]:
+        """Bytes of ``int F(int n) { return n + constant; }``."""
+        return [
+            ("label", label),
+            cls._cptopsp(-4),  # n
+            cls._consti(constant),
+            cls._ADDII,
+            cls._cpdownsp(-12),  # return value slot
+            cls._movsp(-4),
+            cls._movsp(-4),
+            ("JMP", f"{label}_end"),
+            ("label", f"{label}_end"),
+            cls._RETN,
+        ]
+
+    @classmethod
+    def _call_with_one(cls, label: str) -> list[bytes | tuple[str, str]]:
+        """Bytes of the expression ``F(1)`` for an ``int F(int)``."""
+        return [cls._RSADDI, cls._consti(1), ("JSR", label)]
+
+    @classmethod
+    def _starting_conditional_prologue(cls) -> list[bytes | tuple[str, str]]:
+        return [cls._RSADDI, ("JSR", "sc"), cls._RETN]
+
+    @classmethod
+    def _starting_conditional_epilogue(cls) -> list[bytes | tuple[str, str]]:
+        """``return <expression>;`` once the expression's int is on top of the stack."""
+        return [
+            cls._cpdownsp(-8),
+            cls._movsp(-4),
+            ("JMP", "sc_end"),
+            ("label", "sc_end"),
+            cls._RETN,
+        ]
+
+    def _expected_a_b(self) -> bytes:
+        """Bytes of two functions ``A`` (``n + 1``) and ``B`` (``n + 2``) laid out in that order, then the caller
+        ``int StartingConditional() { return A(1) + B(1) * 10; }``."""
+        return self._assemble_ncs(
+            *self._starting_conditional_prologue(),
+            *self._add_constant_function("A", 1),
+            *self._add_constant_function("B", 2),
+            ("label", "sc"),
+            *self._call_with_one("A"),
+            *self._call_with_one("B"),
+            self._consti(10),
+            self._MULII,
+            self._ADDII,
+            *self._starting_conditional_epilogue(),
+        )
+
+    def test_two_prototypes_defined_in_declaration_order(self):
+        """Two prototypes, then both definitions in the order the prototypes were declared."""
+        actual = bytes_ncs(
+            compile_nss(
+                """
+                int A(int n);
+                int B(int n);
+                int A(int n) { return n + 1; }
+                int B(int n) { return n + 2; }
+                int StartingConditional() { return A(1) + B(1) * 10; }
+                """,
+                Game.K1,
+            )
+        )
+        expected = self._expected_a_b()
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
+
+    def test_two_prototypes_defined_in_reverse_order(self):
+        """The definitions come in the opposite order to the prototypes; each body still lands at its own stub."""
+        actual = bytes_ncs(
+            compile_nss(
+                """
+                int A(int n);
+                int B(int n);
+                int B(int n) { return n + 2; }
+                int A(int n) { return n + 1; }
+                int StartingConditional() { return A(1) + B(1) * 10; }
+                """,
+                Game.K1,
+            )
+        )
+        expected = self._expected_a_b()
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
+
+    def test_two_prototypes_interleaved_with_definitions(self):
+        """Each prototype is followed directly by its own definition."""
+        actual = bytes_ncs(
+            compile_nss(
+                """
+                int A(int n);
+                int A(int n) { return n + 1; }
+                int B(int n);
+                int B(int n) { return n + 2; }
+                int StartingConditional() { return A(1) + B(1) * 10; }
+                """,
+                Game.K1,
+            )
+        )
+        expected = self._expected_a_b()
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
+
+    def test_two_prototypes_with_unprototyped_function_between(self):
+        """A function without a prototype is laid out where it is defined, after the prototypes' stubs."""
+        actual = bytes_ncs(
+            compile_nss(
+                """
+                int A(int n);
+                int B(int n);
+                int C(int n) { return n + 3; }
+                int B(int n) { return n + 2; }
+                int A(int n) { return n + 1; }
+                int StartingConditional() { return A(1) + B(1) * 10 + C(1) * 100; }
+                """,
+                Game.K1,
+            )
+        )
+        expected = self._assemble_ncs(
+            *self._starting_conditional_prologue(),
+            *self._add_constant_function("A", 1),
+            *self._add_constant_function("B", 2),
+            *self._add_constant_function("C", 3),
+            ("label", "sc"),
+            *self._call_with_one("A"),
+            *self._call_with_one("B"),
+            self._consti(10),
+            self._MULII,
+            self._ADDII,
+            *self._call_with_one("C"),
+            self._consti(100),
+            self._MULII,
+            self._ADDII,
+            *self._starting_conditional_epilogue(),
+        )
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
+
+    def test_recursion_through_two_prototypes(self):
+        """Mutual recursion between two prototyped functions: each call must reach the other's own body."""
+        actual = bytes_ncs(
+            compile_nss(
+                """
+                int A(int n);
+                int B(int n);
+                int A(int n) { return B(n); }
+                int B(int n) { return A(n); }
+                int StartingConditional() { return A(1); }
+                """,
+                Game.K1,
+            )
+        )
+
+        def forwarding_function(label: str, callee: str) -> list[bytes | tuple[str, str]]:
+            """Bytes of ``int F(int n) { return callee(n); }``."""
+            return [
+                ("label", label),
+                self._RSADDI,
+                self._cptopsp(-8),  # n, below the return slot
+                ("JSR", callee),
+                self._cpdownsp(-12),
+                self._movsp(-4),
+                self._movsp(-4),
+                ("JMP", f"{label}_end"),
+                ("label", f"{label}_end"),
+                self._RETN,
+            ]
+
+        expected = self._assemble_ncs(
+            *self._starting_conditional_prologue(),
+            *forwarding_function("A", "B"),
+            *forwarding_function("B", "A"),
+            ("label", "sc"),
+            *self._call_with_one("A"),
+            *self._starting_conditional_epilogue(),
+        )
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
+
+    # endregion
+
     # region Return Statement Tests
     def test_return(self):
         """Test return statement."""

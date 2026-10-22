@@ -801,7 +801,13 @@ class FunctionDefinition(TopLevelObject):
         self.block.compile(temp, root, None, retn, None, None)
         temp.instructions.append(retn)
 
-        stub_index: int = ncs.instructions.index(root.function_map[name].instruction)
+        # Find the prototype's stub by identity. ``list.index`` compares with ``NCSInstruction.__eq__``,
+        # which is by value, so every NOP stub is "equal" and a second prototype's body would be
+        # inserted after the first prototype's stub.
+        stub: NCSInstruction = root.function_map[name].instruction
+        stub_index: int = next(
+            i for i, instruction in enumerate(ncs.instructions) if instruction is stub
+        )
         ncs.instructions[stub_index + 1 : stub_index + 1] = temp.instructions
 
     def is_matching_signature(
