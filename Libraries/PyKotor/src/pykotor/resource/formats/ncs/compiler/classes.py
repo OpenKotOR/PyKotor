@@ -1303,18 +1303,14 @@ class EngineCallExpression(Expression):
         this_stack = 0
         # DEBUG: Log arguments before compilation
 
-        # Compile arguments in FORWARD order (left to right, first argument first)
-        # NCS bytecode pushes arguments left-to-right, so when the interpreter
-        # pops them (last-in-first-out), args_snap has them in reverse order.
-        # The interpreter then reverses args_snap to match function.params order.
-        # - Compile in forward: push fFloat (first param, bottom), push nWidth, push nDecimals (last param, top)
-        # - Stack: [fFloat, nWidth, nDecimals] (nDecimals on top)
-        # - Interpreter pops: nDecimals -> args_snap[0], nWidth -> args_snap[1], fFloat -> args_snap[2]
-        # - Before reverse: args_snap = [nDecimals, nWidth, fFloat]
-        # - After reverse: args_snap = [fFloat, nWidth, nDecimals] - CORRECT!
-        for i in range(len(self._args)):  # Iterate in forward order
-            arg = self._args[i]
-            param_index = i  # Parameter index in forward order
+        # Push the arguments LAST-first: the last parameter goes onto the stack first
+        # and the first parameter ends up on top, which is the order the NWScript VM
+        # (and the original compiler) expects for every engine action. Omitted
+        # trailing arguments have been filled with their defaults above, so they are
+        # pushed before the explicit ones.
+        # Example: SetGlobalNumber("A", 7) -> CONSTI 7, CONSTS "A", ACTION.
+        for param_index in range(len(self._args) - 1, -1, -1):
+            arg = self._args[param_index]
             param_type = DynamicDataType(self._function.params[param_index].datatype)
             if param_type == DataType.ACTION:
                 after_command = NCSInstruction()

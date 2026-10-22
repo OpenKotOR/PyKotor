@@ -427,9 +427,9 @@ class Interpreter(ComparableMixin):
 
         args_snap = []
 
-        # Pop arguments from stack in reverse order (last param popped first)
-        for i in range(args):
-            param_index = args - 1 - i  # Reverse order
+        # The compiler pushes the last parameter first, so the first parameter is on top
+        # of the stack: pop in parameter order.
+        for param_index in range(args):
             if param_index >= len(function.params):
                 msg = f"Action '{function.name}' parameter index {param_index} out of range"
                 raise ValueError(msg)
@@ -456,20 +456,8 @@ class Interpreter(ComparableMixin):
                     msg = f"Stack underflow while popping argument for '{function.name}'"
                     raise RuntimeError(msg) from e
 
-        # DEBUG: Log args_snap before reverse
-        print(
-            f"DEBUG: args_snap before reverse: {[f'{obj.data_type.name}={obj.value}' for obj in args_snap]}"
-        )
-
-        # We compiled arguments in reverse order (last first), so when we pop them (last-in-first-out),
-        # args_snap[0] is the last parameter and args_snap[-1] is the first parameter.
-        # We need to reverse to match function.params order (first parameter at index 0).
-        args_snap.reverse()
-
-        # DEBUG: Log args_snap after reverse and function params
-        print(
-            f"DEBUG: args_snap after reverse: {[f'{obj.data_type.name}={obj.value}' for obj in args_snap]}"
-        )
+        # DEBUG: Log args_snap (already in function.params order) and function params
+        print(f"DEBUG: args_snap: {[f'{obj.data_type.name}={obj.value}' for obj in args_snap]}")
         print(f"DEBUG: function.params: {[(p.name, p.datatype.name) for p in function.params]}")
 
         # Validate argument types

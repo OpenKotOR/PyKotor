@@ -4,6 +4,7 @@ import errno
 import importlib.util
 import os
 import pathlib
+import struct
 import sys
 import tempfile
 import textwrap
@@ -75,6 +76,40 @@ def _ncs_dencs_available() -> bool:
 
 
 _TSL_NCS_TEST_FILES_DIR = Path(__file__).resolve().parents[3] / "test_files"
+
+
+def _hand_assembled_ncs(*instructions: bytes) -> bytes:
+    """Assemble an NCS file from raw instruction bytes, independent of PyKotor's writer.
+
+    Layout: "NCS V1.0", the 0x42 size marker, the total file size as a big-endian uint32,
+    then the instructions. Every program starts with ``JSR main; RETN`` (``main`` follows at +8).
+    """
+    body = b"".join(instructions)
+    return b"NCS V1.0" + bytes([0x42]) + (13 + len(body)).to_bytes(4, "big") + body
+
+
+_JSR_MAIN = bytes([0x1E, 0x00]) + (8).to_bytes(4, "big", signed=True)
+_RETN = bytes([0x20, 0x00])
+
+
+def _consti(value: int) -> bytes:
+    return bytes([0x04, 0x03]) + value.to_bytes(4, "big", signed=True)
+
+
+def _constf(value: float) -> bytes:
+    return bytes([0x04, 0x04]) + struct.pack(">f", value)
+
+
+def _consts(value: str) -> bytes:
+    return bytes([0x04, 0x05]) + len(value).to_bytes(2, "big") + value.encode("ascii")
+
+
+def _consto(value: int) -> bytes:
+    return bytes([0x04, 0x06]) + value.to_bytes(4, "big", signed=True)
+
+
+def _action(routine_id: int, argc: int) -> bytes:
+    return bytes([0x05, 0x00]) + routine_id.to_bytes(2, "big") + bytes([argc])
 
 
 # ============================================================================
@@ -298,6 +333,91 @@ class TestNCSCompiler(CompilerTestBase):
             }
         """
         )
+
+    def test_enginecall_argument_order_bytes_set_global_number(self):
+        """Engine call arguments are pushed last-first, so the first argument is on top of the stack.
+
+        NSS ``SetGlobalNumber("A", 7)`` must assemble to CONSTI 7, CONSTS "A", ACTION 581 (2 args).
+        The expected bytes are hand-assembled; the Interpreter is deliberately not involved, because it
+        used to carry a compensating bug that hid a swapped argument order.
+        """
+        actual = bytes_ncs(compile_nss('void main() { SetGlobalNumber("A", 7); }', Game.K1))
+        expected = _hand_assembled_ncs(
+            _JSR_MAIN,
+            _RETN,
+            _consti(7),  # nValue, the last parameter, is pushed first
+            _consts("A"),  # sIdentifier, the first parameter, ends up on top
+            _action(581, 2),  # SetGlobalNumber
+            _RETN,
+        )
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
+
+    def test_enginecall_argument_order_bytes_three_mixed_types(self):
+        """A three-argument call with object, int and float parameters pushes float, int, object."""
+        actual = bytes_ncs(
+            compile_nss("void main() { SWMG_SetGunBankSpeed(OBJECT_SELF, 2, 1.5); }", Game.K1)
+        )
+        expected = _hand_assembled_ncs(
+            _JSR_MAIN,
+            _RETN,
+            _constf(1.5),  # fSpeed
+            _consti(2),  # nGunBank
+            _consto(0),  # oVehicle = OBJECT_SELF (on top)
+            _action(637, 3),  # SWMG_SetGunBankSpeed
+            _RETN,
+        )
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
+
+    def test_enginecall_argument_order_bytes_omitted_defaults(self):
+        """Omitted trailing arguments take their defaults and are pushed before the explicit ones.
+
+        ``ActionMoveToObject(object oMoveTo, int bRun=FALSE, float fRange=1.0)`` called with only the
+        object pushes fRange (1.0), bRun (0), then oMoveTo.
+        """
+        actual = bytes_ncs(compile_nss("void main() { ActionMoveToObject(OBJECT_SELF); }", Game.K1))
+        expected = _hand_assembled_ncs(
+            _JSR_MAIN,
+            _RETN,
+            _constf(1.0),  # default fRange
+            _consti(0),  # default bRun
+            _consto(0),  # oMoveTo = OBJECT_SELF (on top)
+            _action(22, 3),  # ActionMoveToObject
+            _RETN,
+        )
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
+
+    def test_enginecall_argument_order_bytes_action_argument(self):
+        """An action argument is pushed (as STORE_STATE + JMP + body + RETN) before the preceding arguments.
+
+        ``DelayCommand(float fSeconds, action aActionToDelay)`` therefore emits the stored action first,
+        then the float, then ACTION 7. The body of the action is itself a last-first engine call.
+        """
+        actual = bytes_ncs(
+            compile_nss('void main() { DelayCommand(1.0, SetGlobalNumber("A", 7)); }', Game.K1)
+        )
+        action_body = b"".join(
+            [
+                _consti(7),
+                _consts("A"),
+                _action(581, 2),  # SetGlobalNumber
+                _RETN,
+            ]
+        )
+        store_state = bytes([0x2C, 0x10]) + (0).to_bytes(4, "big") + (0).to_bytes(4, "big")
+        jmp_past_action = bytes([0x1D, 0x00]) + (6 + len(action_body)).to_bytes(
+            4, "big", signed=True
+        )
+        expected = _hand_assembled_ncs(
+            _JSR_MAIN,
+            _RETN,
+            store_state,  # aActionToDelay, the last parameter, is pushed first
+            jmp_past_action,
+            action_body,
+            _constf(1.0),  # fSeconds, the first parameter, ends up on top
+            _action(7, 2),  # DelayCommand
+            _RETN,
+        )
+        assert actual == expected, f"{actual.hex(' ')} != {expected.hex(' ')}"
 
     # endregion
 
