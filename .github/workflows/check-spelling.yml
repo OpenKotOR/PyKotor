@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Check spelling
-        uses: streetsidesoftware/cspell-action@v8
+        uses: streetsidesoftware/cspell-action@v9
         with:
           files: "**/*.{md,py,txt,yml,yaml}"
           inline: true
