@@ -57,13 +57,13 @@ jobs:
     # Ubuntu: default GitHub policy (Bandit ok; antimalware is Windows-only).
     - name: Run Microsoft Security DevOps (Windows)
       if: matrix.os == 'windows-latest'
-      uses: microsoft/security-devops-action@v1.12.0
+      uses: microsoft/security-devops-action@v1.12.1
       id: msdo_win
       with:
         tools: antimalware,checkov,eslint,templateanalyzer
     - name: Run Microsoft Security DevOps (Linux)
       if: matrix.os == 'ubuntu-latest'
-      uses: microsoft/security-devops-action@v1.12.0
+      uses: microsoft/security-devops-action@v1.12.1
       id: msdo_linux
     - name: Upload results to Security tab
       uses: github/codeql-action/upload-sarif@v4
