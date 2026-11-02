@@ -21,7 +21,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate changelog
-        uses: metcalfc/changelog-generator@v4
+        uses: metcalfc/changelog-generator@v5
         with:
           myToken: ${{ secrets.GITHUB_TOKEN }}
           ignoreLabels: |
