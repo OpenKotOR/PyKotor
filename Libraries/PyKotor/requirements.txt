@@ -2,4 +2,4 @@ bioware-kaitai-formats>=0.1.0
 defusedxml>=0.7.1
 kaitaistruct>=0.11
 ply>=3.11,<4
-pycryptodome>=3.23.0
+pycryptodome>=4.2.0
